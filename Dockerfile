@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY parser.py main.py ./
+COPY parser.py main.py db.py ./
 
 EXPOSE 8000
 
