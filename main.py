@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from parser import parse_eml_bytes, parse_alert_text
-from db import get_connection, insert_alert
+from db import get_connection, get_storage_stats, insert_alert
 
 app = FastAPI(title="Google Alerts Parser", version="0.4.0")
 
@@ -96,6 +96,19 @@ def db_health(authorization: str | None = Header(default=None)):
         return {"status": "ok", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Falha na conexão com o banco: {e}")
+
+
+@app.get("/db-stats")
+def db_stats(authorization: str | None = Header(default=None)):
+    """
+    Contagem de registros e estimativa de espaço usado pela aplicação, pra
+    acompanhar o consumo do limite Always Free (20 GB) da Autonomous Database.
+    """
+    check_auth(authorization)
+    try:
+        return get_storage_stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao consultar estatísticas do banco: {e}")
 
 
 @app.post("/parse-text")

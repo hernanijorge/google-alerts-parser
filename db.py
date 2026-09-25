@@ -158,3 +158,35 @@ def insert_alert(
         }
     finally:
         conn.close()
+
+
+def get_storage_stats() -> dict:
+    """
+    Estimativa do espaço usado pela aplicação (schema do usuário conectado,
+    GOOGLE_ALERTS_OWNER em produção). USER_SEGMENTS cobre tabelas, índices e
+    CLOBs — boa aproximação, mas não é o total exato do banco; o alarme de
+    Storage utilization do OCI é a medida oficial.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT USER FROM DUAL")
+        connected_as = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM ALERT_EMAIL")
+        email_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM ALERT_ARTICLE")
+        article_count = cursor.fetchone()[0]
+        cursor.execute("SELECT NVL(SUM(BYTES), 0) FROM USER_SEGMENTS")
+        total_bytes = cursor.fetchone()[0] or 0
+        gb = total_bytes / (1024 ** 3)
+        return {
+            "connected_as": connected_as,
+            "alert_email_count": email_count,
+            "alert_article_count": article_count,
+            "app_schema_mb": round(total_bytes / (1024 ** 2), 2),
+            "app_schema_gb": round(gb, 4),
+            "always_free_limit_gb": 20,
+            "percent_of_limit": round((gb / 20) * 100, 2),
+        }
+    finally:
+        conn.close()
