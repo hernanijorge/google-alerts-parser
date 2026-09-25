@@ -21,8 +21,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from parser import parse_eml_bytes, parse_alert_text
+from db import get_connection
 
-app = FastAPI(title="Google Alerts Parser", version="0.2.0")
+app = FastAPI(title="Google Alerts Parser", version="0.3.0")
 
 
 class ParseTextRequest(BaseModel):
@@ -63,6 +64,26 @@ async def parse(request: Request, authorization: str | None = Header(default=Non
         raise HTTPException(status_code=422, detail=str(e))
 
     return JSONResponse(content=result)
+
+
+@app.get("/db-health")
+def db_health(authorization: str | None = Header(default=None)):
+    """
+    Testa a conexão com a Autonomous Database (wallet + credenciais).
+    Não grava nada — só valida que a conexão mTLS funciona, do mesmo jeito
+    que /health valida o serviço em si e /parse validou o parser antes de
+    plugar no n8n.
+    """
+    check_auth(authorization)
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM DUAL")
+        (result,) = cursor.fetchone()
+        conn.close()
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha na conexão com o banco: {e}")
 
 
 @app.post("/parse-text")
