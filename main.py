@@ -18,10 +18,15 @@ import os
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from parser import parse_eml_bytes
+from parser import parse_eml_bytes, parse_alert_text
 
-app = FastAPI(title="Google Alerts Parser", version="0.1.0")
+app = FastAPI(title="Google Alerts Parser", version="0.2.0")
+
+
+class ParseTextRequest(BaseModel):
+    text: str
 
 API_TOKEN = os.environ.get("PARSER_API_TOKEN")
 
@@ -55,6 +60,30 @@ async def parse(request: Request, authorization: str | None = Header(default=Non
         result = parse_eml_bytes(raw_bytes)
     except ValueError as e:
         # Erro esperado de parsing (layout inesperado, etc.) -> 422, não 500
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return JSONResponse(content=result)
+
+
+@app.post("/parse-text")
+async def parse_text(body: ParseTextRequest, authorization: str | None = Header(default=None)):
+    """
+    Variante de /parse que recebe o corpo do e-mail já decodificado como
+    texto puro (JSON: {"text": "..."}), em vez do .eml bruto.
+
+    Existe porque o n8n (Gmail Trigger com "Simplify" desligado) já entrega
+    o campo `text` com o corpo em texto puro pronto (MIME/quoted-printable
+    já resolvidos pelo próprio n8n) — reconstruir o .eml bruto dentro do
+    workflow seria trabalho redundante.
+    """
+    check_auth(authorization)
+
+    if not body.text.strip():
+        raise HTTPException(status_code=400, detail="Campo 'text' vazio.")
+
+    try:
+        result = parse_alert_text(body.text)
+    except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
     return JSONResponse(content=result)
