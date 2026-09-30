@@ -210,6 +210,84 @@ def _parse_digest_alert_text(text: str) -> dict:
     }
 
 
+_SHORT_LINE_MAX_CHARS = 40
+
+
+def _split_instant_block(raw_block_text: str) -> tuple[str, str, str]:
+    """
+    Separa (título, fonte, resumo) a partir do bloco bruto que precede o
+    link de UM artigo no formato "as-it-happens".
+
+    Descoberta ao inspecionar e-mails reais (não só o exemplo original de
+    validação): ao contrário do que o parser assumia, o nome da fonte
+    ESTÁ presente em texto puro nesse formato — só não está em posição de
+    linha fixa, porque o Gmail quebra o texto puro em ~70-80 colunas e
+    onde essa quebra cai depende do tamanho exato de cada título. Título
+    e resumo tendem a ocupar quase a largura inteira da linha; a linha da
+    fonte destoa por ser bem mais curta (nome de empresa/veículo, poucas
+    palavras) e pode aparecer 1x ou 2x (duplicada) em seguida — às vezes
+    colada no fim do título com "-" ou "|", às vezes em linha própria.
+
+    Heurística: localizamos a primeira linha "longa" (> _SHORT_LINE_MAX_CHARS)
+    a partir da segunda linha do bloco — ela marca o início do resumo.
+    A fonte é a cauda de linhas curtas imediatamente antes dela: se essa
+    runa de linhas curtas tiver mais de uma linha DIFERENTE (não
+    duplicada), só a última conta como fonte — as anteriores ficam no
+    título (cobre o caso de o título quebrar numa palavra curta, tipo
+    "...Board Default Voting\nApproval", sem virar fonte por engano).
+
+    Limitação conhecida (não resolvida por heurística de texto puro): se
+    o PRÓPRIO nome da fonte quebrar em duas linhas pelo wrap (ex.:
+    "AD HOC\nNEWS"), só a última linha ("NEWS") é capturada como fonte.
+    """
+    lines = [l.strip() for l in raw_block_text.splitlines() if l.strip()]
+    if not lines:
+        return "", "", ""
+    if len(lines) == 1:
+        return lines[0], "", ""
+
+    first_long_idx = None
+    for i in range(1, len(lines)):
+        if len(lines[i]) > _SHORT_LINE_MAX_CHARS:
+            first_long_idx = i
+            break
+
+    if first_long_idx is None:
+        # Bloco inteiro com linhas curtas (raro) — não arrisca separar.
+        return clean_title_or_snippet(" ".join(lines)), "", ""
+
+    run_start = first_long_idx
+    while run_start > 0 and len(lines[run_start - 1]) <= _SHORT_LINE_MAX_CHARS:
+        run_start -= 1
+    short_run = lines[run_start:first_long_idx]
+
+    snippet = clean_title_or_snippet("\n".join(lines[first_long_idx:]))
+
+    if not short_run:
+        return clean_title_or_snippet(" ".join(lines[:first_long_idx])), "", snippet
+
+    # Só a cauda da runa curta (duplicatas exatas incluídas) vira fonte.
+    source_lines = [short_run[-1]]
+    j = len(short_run) - 2
+    while j >= 0 and short_run[j].strip().lower() == source_lines[0].strip().lower():
+        source_lines.insert(0, short_run[j])
+        j -= 1
+
+    source_name = source_lines[0].strip()
+    title_lines = lines[:run_start] + short_run[: j + 1]
+
+    if title_lines:
+        last = title_lines[-1]
+        inline_dup = re.compile(r"\s*[-|]\s*" + re.escape(source_name) + r"\s*$", re.IGNORECASE)
+        if inline_dup.search(last):
+            title_lines[-1] = inline_dup.sub("", last)
+        else:
+            title_lines[-1] = re.sub(r"\s*[-|]\s*$", "", last)
+
+    title = clean_title_or_snippet(" ".join(title_lines))
+    return title, source_name, snippet
+
+
 def _parse_instant_alert_text(text: str, header_match: "re.Match") -> dict:
     """
     Formato "As-it-happens" — notificação instantânea (1 ou mais
@@ -256,7 +334,8 @@ def _parse_instant_alert_text(text: str, header_match: "re.Match") -> dict:
         title_parts = [pending_text]
         for k in range(i, j):
             title_parts.append(body_text[url_matches[k].end() : url_matches[k + 1].start()])
-        title_text = clean_title_or_snippet(" ".join(title_parts))
+        raw_block_text = " ".join(title_parts) if len(title_parts) > 1 else title_parts[0]
+        title_text, source_name, snippet = _split_instant_block(raw_block_text)
 
         seg_start = url_matches[j].end()
         if g_idx + 1 < len(groups):
@@ -269,8 +348,8 @@ def _parse_instant_alert_text(text: str, header_match: "re.Match") -> dict:
             {
                 "title": title_text,
                 "url": article_url,
-                "source_name": "",
-                "snippet": "",
+                "source_name": source_name,
+                "snippet": snippet,
             }
         )
 
