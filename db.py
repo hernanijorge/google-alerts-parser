@@ -160,54 +160,6 @@ def insert_alert(
         conn.close()
 
 
-def get_raw_samples(gmail_account: Optional[str], limit: int, offset: int) -> list[dict]:
-    """
-    Leitura pura (sem gravar nada) de e-mails já armazenados, pra montar
-    uma amostra de teste offline do parser contra RAW_TEXT real. Usado
-    pelo endpoint de debug /debug/sample-raw.
-    """
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        if gmail_account:
-            cursor.execute(
-                """
-                SELECT ID, GMAIL_ACCOUNT, TOPIC, CADENCE_LABEL, RAW_TEXT
-                FROM ALERT_EMAIL
-                WHERE GMAIL_ACCOUNT = :gmail_account
-                ORDER BY ID
-                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
-                """,
-                {"gmail_account": gmail_account, "offset": offset, "limit": limit},
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT ID, GMAIL_ACCOUNT, TOPIC, CADENCE_LABEL, RAW_TEXT
-                FROM ALERT_EMAIL
-                ORDER BY ID
-                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
-                """,
-                {"offset": offset, "limit": limit},
-            )
-        rows = cursor.fetchall()
-        results = []
-        for row_id, account, topic, cadence_label, raw_text_lob in rows:
-            raw_text = raw_text_lob.read() if raw_text_lob is not None else None
-            results.append(
-                {
-                    "id": row_id,
-                    "gmail_account": account,
-                    "topic": topic,
-                    "cadence_label": cadence_label,
-                    "raw_text": raw_text,
-                }
-            )
-        return results
-    finally:
-        conn.close()
-
-
 def get_reparse_candidates(gmail_account: Optional[str], limit: int) -> list[dict]:
     """
     Seleciona e-mails que têm pelo menos um artigo com SOURCE_NAME nulo

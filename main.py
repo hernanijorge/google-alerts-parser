@@ -29,7 +29,6 @@ from db import (
     get_connection,
     get_storage_stats,
     insert_alert,
-    get_raw_samples,
     get_reparse_candidates,
     reprocess_email_articles,
     get_source_snippet_counts,
@@ -142,26 +141,6 @@ async def parse_text(body: ParseTextRequest, authorization: str | None = Header(
         raise HTTPException(status_code=422, detail=str(e))
 
     return JSONResponse(content=result)
-
-
-@app.get("/debug/sample-raw")
-def debug_sample_raw(
-    account: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
-    authorization: str | None = Header(default=None),
-):
-    """
-    Leitura pura de RAW_TEXT já armazenado (não grava nada), pra montar
-    amostra de teste offline do parser. `limit` limitado a 100 por chamada
-    pra não puxar CLOBs grandes demais de uma vez.
-    """
-    check_auth(authorization)
-    limit = max(1, min(limit, 100))
-    try:
-        return {"samples": get_raw_samples(account, limit, offset)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao consultar amostras: {e}")
 
 
 @app.get("/debug/source-snippet-counts")
