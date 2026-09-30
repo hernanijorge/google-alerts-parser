@@ -25,7 +25,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from parser import parse_eml_bytes, parse_alert_text
-from db import get_connection, get_storage_stats, insert_alert
+from db import (
+    get_connection,
+    get_storage_stats,
+    insert_alert,
+    get_raw_samples,
+    get_reparse_candidates,
+    reprocess_email_articles,
+    get_source_snippet_counts,
+)
 
 app = FastAPI(title="Google Alerts Parser", version="0.4.0")
 
@@ -134,6 +142,78 @@ async def parse_text(body: ParseTextRequest, authorization: str | None = Header(
         raise HTTPException(status_code=422, detail=str(e))
 
     return JSONResponse(content=result)
+
+
+@app.get("/debug/sample-raw")
+def debug_sample_raw(
+    account: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Leitura pura de RAW_TEXT já armazenado (não grava nada), pra montar
+    amostra de teste offline do parser. `limit` limitado a 100 por chamada
+    pra não puxar CLOBs grandes demais de uma vez.
+    """
+    check_auth(authorization)
+    limit = max(1, min(limit, 100))
+    try:
+        return {"samples": get_raw_samples(account, limit, offset)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao consultar amostras: {e}")
+
+
+@app.get("/debug/source-snippet-counts")
+def debug_source_snippet_counts(authorization: str | None = Header(default=None)):
+    """Query de validação: por conta, quantos artigos têm SOURCE_NAME/SNIPPET preenchidos."""
+    check_auth(authorization)
+    try:
+        return {"counts": get_source_snippet_counts()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao consultar contagens: {e}")
+
+
+class ReprocessBatchRequest(BaseModel):
+    gmail_account: str | None = None
+    limit: int = 20
+
+
+@app.post("/reprocess-batch")
+def reprocess_batch(body: ReprocessBatchRequest, authorization: str | None = Header(default=None)):
+    """
+    Reprocessa um lote de e-mails já gravados (RAW_TEXT -> novo parse ->
+    UPDATE de TITLE/SOURCE_NAME/SNIPPET em ALERT_ARTICLE), sem tocar no
+    Gmail. Idempotente: rodar de novo sobre o mesmo registro só sobrescreve
+    com o mesmo resultado. Limitado a 50 por chamada pra manter cada
+    requisição rápida e não competir demais com a carga do backfill.
+    """
+    check_auth(authorization)
+    limit = max(1, min(body.limit, 50))
+    try:
+        candidates = get_reparse_candidates(body.gmail_account, limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao buscar candidatos: {e}")
+
+    results = []
+    for candidate in candidates:
+        raw_text = candidate["raw_text"]
+        if not raw_text:
+            results.append({"id": candidate["id"], "status": "skipped_empty_raw_text"})
+            continue
+        try:
+            parsed = parse_alert_text(raw_text)
+        except ValueError as e:
+            results.append({"id": candidate["id"], "status": "parse_error", "detail": str(e)})
+            continue
+        try:
+            result = reprocess_email_articles(candidate["id"], parsed)
+        except Exception as e:
+            results.append({"id": candidate["id"], "status": "db_error", "detail": str(e)})
+            continue
+        results.append(result)
+
+    return {"processed": len(results), "remaining_hint": len(candidates) == limit, "results": results}
 
 
 @app.post("/ingest")

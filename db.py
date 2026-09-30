@@ -160,6 +160,164 @@ def insert_alert(
         conn.close()
 
 
+def get_raw_samples(gmail_account: Optional[str], limit: int, offset: int) -> list[dict]:
+    """
+    Leitura pura (sem gravar nada) de e-mails já armazenados, pra montar
+    uma amostra de teste offline do parser contra RAW_TEXT real. Usado
+    pelo endpoint de debug /debug/sample-raw.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        if gmail_account:
+            cursor.execute(
+                """
+                SELECT ID, GMAIL_ACCOUNT, TOPIC, CADENCE_LABEL, RAW_TEXT
+                FROM ALERT_EMAIL
+                WHERE GMAIL_ACCOUNT = :gmail_account
+                ORDER BY ID
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+                """,
+                {"gmail_account": gmail_account, "offset": offset, "limit": limit},
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT ID, GMAIL_ACCOUNT, TOPIC, CADENCE_LABEL, RAW_TEXT
+                FROM ALERT_EMAIL
+                ORDER BY ID
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+                """,
+                {"offset": offset, "limit": limit},
+            )
+        rows = cursor.fetchall()
+        results = []
+        for row_id, account, topic, cadence_label, raw_text_lob in rows:
+            raw_text = raw_text_lob.read() if raw_text_lob is not None else None
+            results.append(
+                {
+                    "id": row_id,
+                    "gmail_account": account,
+                    "topic": topic,
+                    "cadence_label": cadence_label,
+                    "raw_text": raw_text,
+                }
+            )
+        return results
+    finally:
+        conn.close()
+
+
+def get_reparse_candidates(gmail_account: Optional[str], limit: int) -> list[dict]:
+    """
+    Seleciona e-mails que têm pelo menos um artigo com SOURCE_NAME nulo
+    (candidatos a reprocessamento retroativo), trazendo o RAW_TEXT pra
+    re-parsear localmente. Usado pelo /reprocess-batch.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        base_query = """
+            SELECT ae.ID, ae.GMAIL_ACCOUNT, ae.RAW_TEXT
+            FROM ALERT_EMAIL ae
+            WHERE EXISTS (
+                SELECT 1 FROM ALERT_ARTICLE aa
+                WHERE aa.ALERT_EMAIL_ID = ae.ID AND aa.SOURCE_NAME IS NULL
+            )
+        """
+        params = {"limit": limit}
+        if gmail_account:
+            base_query += " AND ae.GMAIL_ACCOUNT = :gmail_account"
+            params["gmail_account"] = gmail_account
+        base_query += " ORDER BY ae.ID FETCH FIRST :limit ROWS ONLY"
+
+        cursor.execute(base_query, params)
+        rows = cursor.fetchall()
+        results = []
+        for row_id, account, raw_text_lob in rows:
+            raw_text = raw_text_lob.read() if raw_text_lob is not None else None
+            results.append({"id": row_id, "gmail_account": account, "raw_text": raw_text})
+        return results
+    finally:
+        conn.close()
+
+
+def reprocess_email_articles(alert_email_id: int, parsed: dict) -> dict:
+    """
+    Re-grava TITLE/SOURCE_NAME/SNIPPET dos artigos de um e-mail já
+    existente, casando por POSITION_IN_EMAIL (a ordem dos artigos no
+    e-mail não muda entre parses -- só a qualidade da extração melhora).
+    Não insere nem remove artigos, só faz UPDATE dos 3 campos de texto.
+    Se o novo parse encontrar um número de artigos diferente do que já
+    está gravado (não deveria acontecer, já que a extração de URL não
+    mudou), não faz nada e devolve status "skipped_count_mismatch" --
+    mais seguro que gravar dado desalinhado.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM ALERT_ARTICLE WHERE ALERT_EMAIL_ID = :id",
+            {"id": alert_email_id},
+        )
+        (existing_count,) = cursor.fetchone()
+
+        articles = parsed.get("articles", [])
+        if existing_count != len(articles):
+            return {
+                "id": alert_email_id,
+                "status": "skipped_count_mismatch",
+                "existing_count": existing_count,
+                "new_count": len(articles),
+            }
+
+        updated = 0
+        for position, article in enumerate(articles, start=1):
+            cursor.execute(
+                """
+                UPDATE ALERT_ARTICLE
+                SET TITLE = :title, SOURCE_NAME = :source_name, SNIPPET = :snippet
+                WHERE ALERT_EMAIL_ID = :alert_email_id AND POSITION_IN_EMAIL = :position
+                """,
+                {
+                    "title": article.get("title"),
+                    "source_name": article.get("source_name") or None,
+                    "snippet": article.get("snippet") or None,
+                    "alert_email_id": alert_email_id,
+                    "position": position,
+                },
+            )
+            updated += cursor.rowcount
+
+        conn.commit()
+        return {"id": alert_email_id, "status": "ok", "articles_updated": updated}
+    finally:
+        conn.close()
+
+
+def get_source_snippet_counts() -> list[dict]:
+    """Query de validação: por conta, quantos artigos têm SOURCE_NAME/SNIPPET preenchidos."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT ae.GMAIL_ACCOUNT,
+                   COUNT(*) AS total_artigos,
+                   SUM(CASE WHEN aa.SOURCE_NAME IS NOT NULL THEN 1 ELSE 0 END) AS com_source_name,
+                   SUM(CASE WHEN aa.SNIPPET IS NOT NULL THEN 1 ELSE 0 END) AS com_snippet
+            FROM ALERT_EMAIL ae
+            JOIN ALERT_ARTICLE aa ON aa.ALERT_EMAIL_ID = ae.ID
+            GROUP BY ae.GMAIL_ACCOUNT
+            ORDER BY ae.GMAIL_ACCOUNT
+            """
+        )
+        cols = ["gmail_account", "total_artigos", "com_source_name", "com_snippet"]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_storage_stats() -> dict:
     """
     Estimativa do espaço usado pela aplicação (schema do usuário conectado,
