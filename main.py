@@ -32,6 +32,7 @@ from db import (
     get_reparse_candidates,
     reprocess_email_articles,
     get_source_snippet_counts,
+    STUCK_CANDIDATE_IDS,
 )
 
 app = FastAPI(title="Google Alerts Parser", version="0.4.0")
@@ -178,11 +179,13 @@ def reprocess_batch(body: ReprocessBatchRequest, authorization: str | None = Hea
     for candidate in candidates:
         raw_text = candidate["raw_text"]
         if not raw_text:
+            STUCK_CANDIDATE_IDS.add(candidate["id"])
             results.append({"id": candidate["id"], "status": "skipped_empty_raw_text"})
             continue
         try:
             parsed = parse_alert_text(raw_text)
         except ValueError as e:
+            STUCK_CANDIDATE_IDS.add(candidate["id"])
             results.append({"id": candidate["id"], "status": "parse_error", "detail": str(e)})
             continue
         try:
@@ -190,9 +193,15 @@ def reprocess_batch(body: ReprocessBatchRequest, authorization: str | None = Hea
         except Exception as e:
             results.append({"id": candidate["id"], "status": "db_error", "detail": str(e)})
             continue
+        if result.get("status") == "ok":
+            still_null = any(not (a.get("source_name") or "").strip() for a in parsed.get("articles", []))
+            if still_null:
+                STUCK_CANDIDATE_IDS.add(candidate["id"])
+        elif result.get("status") == "skipped_count_mismatch":
+            STUCK_CANDIDATE_IDS.add(candidate["id"])
         results.append(result)
 
-    return {"processed": len(results), "remaining_hint": len(candidates) == limit, "results": results}
+    return {"processed": len(results), "remaining_hint": len(candidates) == limit, "results": results, "stuck_ids_known": len(STUCK_CANDIDATE_IDS)}
 
 
 @app.post("/ingest")

@@ -160,24 +160,45 @@ def insert_alert(
         conn.close()
 
 
+STUCK_CANDIDATE_IDS: set[int] = set()
+_EXCLUDE_CHUNK_SIZE = 900
+
+
 def get_reparse_candidates(gmail_account: Optional[str], limit: int) -> list[dict]:
     """
     Seleciona e-mails que têm pelo menos um artigo com SOURCE_NAME nulo
     (candidatos a reprocessamento retroativo), trazendo o RAW_TEXT pra
     re-parsear localmente. Usado pelo /reprocess-batch.
+
+    Exclui STUCK_CANDIDATE_IDS (e-mails cujo reprocessamento mais recente
+    não resolveu o SOURCE_NAME nulo) via NOT IN em lotes de até
+    _EXCLUDE_CHUNK_SIZE. Sem essa exclusão no próprio SQL, ORDER BY ID +
+    FETCH FIRST eventualmente fica preso retornando sempre os mesmos
+    registros permanentemente não corrigíveis, travando o progresso.
     """
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        base_query = """
+        params = {"limit": limit}
+        exclude_sql = ""
+        excluded = sorted(STUCK_CANDIDATE_IDS)
+        for i in range(0, len(excluded), _EXCLUDE_CHUNK_SIZE):
+            chunk = excluded[i:i + _EXCLUDE_CHUNK_SIZE]
+            names = []
+            for j, val in enumerate(chunk):
+                pname = f"ex{i}_{j}"
+                names.append(f":{pname}")
+                params[pname] = val
+            exclude_sql += f" AND ae.ID NOT IN ({','.join(names)})"
+
+        base_query = f"""
             SELECT ae.ID, ae.GMAIL_ACCOUNT, ae.RAW_TEXT
             FROM ALERT_EMAIL ae
             WHERE EXISTS (
                 SELECT 1 FROM ALERT_ARTICLE aa
                 WHERE aa.ALERT_EMAIL_ID = ae.ID AND aa.SOURCE_NAME IS NULL
-            )
+            ){exclude_sql}
         """
-        params = {"limit": limit}
         if gmail_account:
             base_query += " AND ae.GMAIL_ACCOUNT = :gmail_account"
             params["gmail_account"] = gmail_account
