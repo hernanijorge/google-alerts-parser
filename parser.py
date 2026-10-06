@@ -304,14 +304,18 @@ def _parse_instant_alert_text(text: str, header_match: "re.Match") -> dict:
         if i <= header_idx:
             continue
         stripped = l.strip()
-        # separador tipo "- - - - - - - -" (só hífen e espaço) OU início
-        # do rodapé — visto em inglês ("Unsubscribe", "Create another
-        # Google Alert") e é razoável esperar variações em outros idiomas,
-        # por isso o separador de hífens é o critério mais confiável.
-        if stripped and all(c in "- " for c in stripped):
+        # separador real tipo "- - - - - - - -" tem vários hifens em
+        # sequência. Uma linha com um único "-" é artefato do Gmail
+        # quebrando "Título - Fonte" no meio (visto em e-mails reais) e
+        # NÃO deve ser tratada como rodapé — por isso exige 3+ hifens.
+        if stripped and all(c in "- " for c in stripped) and stripped.count("-") >= 3:
             end_idx = i
             break
-        if "Unsubscribe" in l or "Create another Google Alert" in l:
+        if (
+            "Unsubscribe" in l
+            or "Create another Google Alert" in l
+            or "Sign in to manage your alerts" in l
+        ):
             end_idx = i
             break
 
