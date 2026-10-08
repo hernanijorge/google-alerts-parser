@@ -311,8 +311,12 @@ def _parse_instant_alert_text(text: str, header_match: "re.Match") -> dict:
         if stripped and all(c in "- " for c in stripped) and stripped.count("-") >= 3:
             end_idx = i
             break
+        # Frase exata do rodapé do Google (visto em e-mail real: um site
+        # cujo próprio resumo cita "Unsubscribe from updates" — substring
+        # solta "Unsubscribe" bate nisso e corta o corpo antes de
+        # qualquer link; por isso exige a frase completa do Google).
         if (
-            "Unsubscribe" in l
+            "Unsubscribe from this Google Alert" in l
             or "Create another Google Alert" in l
             or "Sign in to manage your alerts" in l
         ):
